@@ -2,8 +2,12 @@ from typing import Any
 from server import mcp
 
 @mcp.tool()
-def base_conversion(number: int, base: int) -> str:
+def multiply(first_val: float, second_val: float) -> float:
     '''
-    Convert a number to a different base
+    Calculate the product of two numbers
+
+    Args:
+        first_val: the first value to be multiplied
+        second_val: the second value to be multiplied
     '''
-    return bin(number)[2:]
+    return round(first_val * second_val, 4)
