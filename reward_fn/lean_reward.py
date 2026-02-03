@@ -1,69 +1,83 @@
-from lean_dojo import (
-    LeanGitRepo, 
-    Theorem, 
-    Dojo,
-    ProofFinished,
-    LeanError,
-)
-import tempfile
 import os
-import json
+import tempfile
+import subprocess
+from pathlib import Path
+from osmosis_ai import osmosis_reward
 
-def verify_lean_with_dojo(lean_code_string: str, repo_url: str, theorem_name: str) -> int:
+
+def _lean_verify_with_reason(solution_str: str) -> tuple[float, str]:
     """
-    Verify Lean code using Lean Dojo's Dojo environment.
-    Requires an actual Lean repository with the theorem.
-    
-    Args:
-        lean_code_string: The Lean code (for reference)
-        repo_url: GitHub URL of Lean repository containing the code
-        theorem_name: Name of the theorem to verify
-    
-    Returns:
-        1 if theorem type-checks and can be accessed, 0 otherwise
+    Run Lean kernel check on solution_str.
+    Returns (reward, reason): (1.0, success_msg) or (0.0, failure_output).
     """
-    
     try:
-        # Point to mathlib4 with v4.11.0
-        repo = LeanGitRepo(
-            url=repo_url,
-            commit=None  # Uses HEAD, update to specific commit if needed
-        )
-        
-        # Specify the file and theorem to verify
-        # You'd need to know the file path and theorem name
-        theorem = Theorem(repo, "lean_files/Four.lean", "intersection_subset_left")
-        
-        # Try to open the Dojo environment (this checks if theorem exists)
-        with Dojo(theorem) as (dojo, init_state):
-            # If we can open the Dojo without errors, the theorem is valid
-            # init_state contains the initial proof state
-            if init_state is not None:
-                return 1
-            else:
-                return 0
-                
+        reward_fn_dir = Path(__file__).parent
+        project_root = reward_fn_dir.parent
+        lean_env_dir = project_root / "lean_env"
+
+        if not lean_env_dir.exists():
+            return 0.0, f"Lean environment not found at {lean_env_dir}"
+
+        with tempfile.NamedTemporaryFile(
+            mode='w',
+            suffix='.lean',
+            dir=lean_env_dir,
+            delete=False
+        ) as temp_file:
+            temp_file.write(solution_str)
+            temp_file_path = temp_file.name
+
+        try:
+            result = subprocess.run(
+                ['lake', 'env', 'lean', temp_file_path],
+                cwd=lean_env_dir,
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+
+            if result.returncode == 0:
+                stderr_lower = (result.stderr or "").lower()
+                if 'error' not in stderr_lower or len((result.stderr or "").strip()) == 0:
+                    return 1.0, "Proof is valid."
+
+            # Failure: prefer stderr, then stdout, then returncode
+            out = (result.stderr or "").strip() or (result.stdout or "").strip()
+            if not out:
+                out = f"Lean exited with code {result.returncode} (no output)."
+            return 0.0, out
+
+        finally:
+            if os.path.exists(temp_file_path):
+                os.unlink(temp_file_path)
+
+    except subprocess.TimeoutExpired:
+        return 0.0, "Lean verification timed out (30s)."
     except Exception as e:
-        print(f"Dojo verification failed: {str(e)}")
-        return 0
+        return 0.0, f"Error verifying proof: {e}"
 
 
-# Example usage:
-if __name__ == "__main__":
-    # Example 1: Simple Lean code
-    simple_code = """
-    theorem test : 2 + 2 = 4 := by
-        decide
+@osmosis_reward
+def lean_proof_reward(solution_str: str, ground_truth: str = None):
     """
-    
-    result = verify_lean_simple(simple_code)
-    print(f"Verification result: {result}")
-    
-    # Example 2: Code with syntax error
-    invalid_code = """
-import Mathlib open scoped ENNReal NNReal Nat open MeasureTheory Real Set Filter Topology theorem poissonPMFRealSum_extracted (r : ℝ≥0) : HasSum (fun n => ProbabilityTheory.poissonPMFReal r n) 1 := sorry
+    Reward function for Lean 4 proofs.
+    Returns 1.0 if the proof passes the Lean kernel check, 0.0 otherwise.
+
+    Args:
+        solution_str: String containing the Lean proof code
+        ground_truth: Optional ground truth (not used for kernel verification)
+
+    Returns:
+        float: 1.0 if proof is valid, 0.0 otherwise
     """
-    result = verify_lean_simple(invalid_code)
-    print(f"Invalid code verification: {result}")
-    
-  
+    reward, _ = _lean_verify_with_reason(solution_str)
+    return reward
+
+
+def lean_proof_reward_with_reason(solution_str: str, ground_truth: str = None) -> tuple[float, str]:
+    """
+    Same as lean_proof_reward but returns (reward, reason) so callers can show why it failed.
+    reason is e.g. "Proof is valid." on success, or Lean stderr / error message on failure.
+    """
+    return _lean_verify_with_reason(solution_str)
+
